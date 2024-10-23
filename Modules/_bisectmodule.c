@@ -66,6 +66,17 @@ internal_bisect_right(PyObject *list, PyObject *item, Py_ssize_t lo, Py_ssize_t 
         if (hi < 0)
             return -1;
     }
+    if (hi > PySequence_Size(list)){
+        PyErr_SetString(PyExc_ValueError, "hi is out of bounds");
+        return -1;
+    }
+    if (hi < lo){
+        PyErr_SetString(PyExc_ValueError, "hi is less than lo");
+        return -1;
+    }
+    if (hi == lo){
+	return lo;
+    }
     ssizeargfunc sq_item = get_sq_item(list);
     if (sq_item == NULL) {
         return -1;
@@ -75,11 +86,75 @@ internal_bisect_right(PyObject *list, PyObject *item, Py_ssize_t lo, Py_ssize_t 
     }
     PyTypeObject *tp = Py_TYPE(item);
     richcmpfunc compare = tp->tp_richcompare;
-    while (lo < hi) {
+    
+    // if x < a[lo]: return lo
+
+    // litem = key(list[lo])
+    litem = sq_item(list, lo);
+    assert((PyErr_Occurred() == NULL) ^ (litem == NULL));
+    if (litem == NULL) {
+        goto error;
+    }
+    if (key != Py_None) {
+        PyObject *newitem = PyObject_CallOneArg(key, litem);
+        if (newitem == NULL) {
+            goto error;
+        }
+        Py_SETREF(litem, newitem);
+    }
+
+    // if item < llitem: return lo
+    if (compare != NULL && Py_IS_TYPE(litem, tp)) {
+        // A fast path for comparing objects of the same type
+        PyObject *res_obj = compare(item, litem, Py_LT);
+        if (res_obj == Py_True) {
+            // We were able to make the comparison
+	    // item < llitem
+            Py_DECREF(res_obj);
+            Py_DECREF(litem);
+            Py_LeaveRecursiveCall();
+            return lo;
+        }
+	else if (res_obj == Py_False) {
+	    // We were able to make the comparison
+	    // item >= llitem
+            Py_DECREF(res_obj);
+            // Py_DECREF(litem); // We will do this garbage collection later
+	    res = 0;
+        } 
+	else {
+            if (res_obj == NULL) {
+                goto error;
+            }
+            if (res_obj == Py_NotImplemented) {
+                Py_DECREF(res_obj);
+                compare = NULL;
+                res = PyObject_RichCompareBool(item, litem, Py_LT);
+            }
+            else {
+                res = PyObject_IsTrue(res_obj);
+                Py_DECREF(res_obj);
+            }
+        }
+    }
+    else {
+        // A default path for comparing arbitrary objects
+        res = PyObject_RichCompareBool(item, litem, Py_LT);
+    }
+    if (res < 0) {
+        goto error;
+    }
+    Py_DECREF(litem);
+    if (res) {
+        Py_LeaveRecursiveCall();
+        return lo;
+    }
+
+    mid = ((size_t)lo + hi) / 2;
+    while (lo < mid) {
         /* The (size_t)cast ensures that the addition and subsequent division
            are performed as unsigned operations, avoiding difficulties from
            signed overflow.  (See issue 13496.) */
-        mid = ((size_t)lo + hi) / 2;
         assert(mid >= 0);
         // PySequence_GetItem, but we already checked the types.
         litem = sq_item(list, mid);
@@ -97,7 +172,7 @@ internal_bisect_right(PyObject *list, PyObject *item, Py_ssize_t lo, Py_ssize_t 
         /* if item < key(list[mid]):
          *     hi = mid
          * else:
-         *     lo = mid + 1
+         *     lo = mid 
          */
         if (compare != NULL && Py_IS_TYPE(litem, tp)) {
             // A fast path for comparing objects of the same type
@@ -106,12 +181,14 @@ internal_bisect_right(PyObject *list, PyObject *item, Py_ssize_t lo, Py_ssize_t 
                 Py_DECREF(res_obj);
                 Py_DECREF(litem);
                 hi = mid;
+                mid = ((size_t)lo + hi) / 2;
                 continue;
             }
             if (res_obj == Py_False) {
                 Py_DECREF(res_obj);
                 Py_DECREF(litem);
-                lo = mid + 1;
+                lo = mid;
+                mid = ((size_t)lo + hi) / 2;
                 continue;
             }
             if (res_obj == NULL) {
@@ -138,10 +215,11 @@ internal_bisect_right(PyObject *list, PyObject *item, Py_ssize_t lo, Py_ssize_t 
         if (res)
             hi = mid;
         else
-            lo = mid + 1;
+            lo = mid;
+        mid = ((size_t)lo + hi) / 2;
     }
     Py_LeaveRecursiveCall();
-    return lo;
+    return hi;
 error:
     Py_LeaveRecursiveCall();
     Py_XDECREF(litem);
@@ -482,3 +560,4 @@ PyInit__bisect(void)
 {
     return PyModuleDef_Init(&_bisectmodule);
 }
+
